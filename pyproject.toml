@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mirror_viz"
+version = "0.1.0"
+description = "2D optical simulation with steerable mirrors and laser path correction"
+authors = [
+    { name = "Sam Muddimer", email = "sam@example.com" }
+]
+license = { text = "MIT" }
+readme = "README.md"
+requires-python = ">=3.8"
+
+dependencies = [
+    "numpy >= 1.23",
+    "plotly >= 5.0"
+]
+
+[project.urls]
+Homepage = "https://github.com/yourusername/mirror_viz"
+Repository = "https://github.com/yourusername/mirror_viz"
