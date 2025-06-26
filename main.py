@@ -11,6 +11,8 @@ Date   : 26 Jun 2025
 # 0. Imports
 # ───────────────────────────────────────────────────────────────
 from __future__ import annotations
+
+from dataclasses import dataclass
 import numpy as np
 import plotly.graph_objects as go
 
@@ -35,12 +37,17 @@ def _rot(theta: float) -> np.ndarray:
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s], [s, c]])
 
-def _unit(vec: np.ndarray) -> np.ndarray:
-    """Return vec / ‖vec‖."""
-    nrm = np.linalg.norm(vec)
-    if nrm == 0:
-        raise ValueError("Zero-length vector cannot be normalised.")
+def _unit(vec: np.ndarray, *, tol: float = 1e-12) -> np.ndarray:
+    """Return ``vec`` normalised to unit length."""
+    nrm = float(np.linalg.norm(vec))
+    if nrm < tol:
+        raise ValueError("Cannot normalise near-zero-length vector.")
     return vec / nrm
+
+
+def _cross2d(a: np.ndarray, b: np.ndarray) -> float:
+    """2-D cross product returning a scalar."""
+    return float(a[0] * b[1] - a[1] * b[0])
 
 
 # ───────────────────────────────────────────────────────────────
@@ -48,28 +55,35 @@ def _unit(vec: np.ndarray) -> np.ndarray:
 # ───────────────────────────────────────────────────────────────
 class Mirror2D:
     """Flat mirror with finite visible surface."""
+
     def __init__(
         self,
-        pivot:   np.ndarray,
-        n_rest:  np.ndarray,
-        d:       float = D_STANDOFF,
-        seg_L:   float = SEG_LEN,
-        theta:   float = 0.0,
+        pivot: np.ndarray,
+        n_rest: np.ndarray,
+        d: float = D_STANDOFF,
+        seg_L: float = SEG_LEN,
+        theta: float = 0.0,
     ) -> None:
-        self.pivot   = np.asarray(pivot, dtype=float)
-        self.n_rest  = _unit(np.asarray(n_rest, dtype=float))
-        self.d       = float(d)
-        self.seg_L   = float(seg_L)
-        self._theta  = 0.0
-        self.set_tilt(theta)
+        self.pivot = np.asarray(pivot, dtype=float)
+        self.n_rest = _unit(np.asarray(n_rest, dtype=float))
+        self.d = float(d)
+        self.seg_L = float(seg_L)
+        self.theta = theta
 
     # ——— public API ———
-    def set_tilt(self, theta: float) -> None:
-        """Clamp θ to mechanical limits and store."""
-        theta = float(theta)
-        if abs(theta) > MAX_TILT_RAD:
+    @property
+    def theta(self) -> float:
+        return self._theta
+
+    @theta.setter
+    def theta(self, angle: float) -> None:
+        angle = float(angle)
+        if abs(angle) > MAX_TILT_RAD:
             raise ValueError(f"|θ| must be ≤ {MAX_TILT_DEG}°")
-        self._theta = theta
+        self._theta = angle
+
+    def set_tilt(self, theta: float) -> None:  # backwards compatibility
+        self.theta = theta
 
     # current normal
     def normal(self) -> np.ndarray:
@@ -93,11 +107,16 @@ class Mirror2D:
                 S + 0.5 * self.seg_L * tangent)
 
 
+@dataclass
 class Emitter2D:
     """Point laser emitter with fixed origin and heading ψ."""
-    def __init__(self, pos: np.ndarray, angle: float) -> None:
-        self.pos   = np.asarray(pos, dtype=float)
-        self.angle = float(angle)
+
+    pos: np.ndarray
+    angle: float
+
+    def __post_init__(self) -> None:
+        self.pos = np.asarray(self.pos, dtype=float)
+        self.angle = float(self.angle)
 
     def direction(self) -> np.ndarray:
         return np.array([np.cos(self.angle), np.sin(self.angle)])
@@ -107,22 +126,31 @@ class Emitter2D:
 # 4. Stand-alone utilities
 # ───────────────────────────────────────────────────────────────
 def intersect_line_with_segment(
-    P0: np.ndarray, d0: np.ndarray,
-    S1: np.ndarray, S2: np.ndarray
+    P0: np.ndarray,
+    d0: np.ndarray,
+    S1: np.ndarray,
+    S2: np.ndarray,
+    *,
+    tol: float = 1e-9,
 ) -> np.ndarray | None:
-    """
-    Intersection point between the infinite line P0+λd0 (λ ∈ ℝ)
-    and the finite segment [S1,S2]. Returns None if no hit.
-    """
+    """Intersection of line ``P0+λd0`` with the segment ``[S1,S2]``."""
+
     d0 = np.asarray(d0, dtype=float)
-    S1, S2 = map(np.asarray, (S1, S2))
+    if np.linalg.norm(d0) < tol:
+        raise ValueError("Direction vector d0 must be non-zero")
+    d0 = _unit(d0)
+
+    S1, S2 = map(lambda x: np.asarray(x, dtype=float), (S1, S2))
     v = S2 - S1
-    M = np.column_stack((d0, -v))
-    b = S1 - P0
-    if abs(np.linalg.det(M)) < 1e-12:
-        return None                     # parallel
-    lam, mu = np.linalg.solve(M, b)
-    if 0.0 <= mu <= 1.0:                # within the segment
+
+    denom = _cross2d(d0, v)
+    if abs(denom) < tol:
+        return None  # parallel or degenerate
+
+    lam = _cross2d(S1 - P0, v) / denom
+    mu = _cross2d(S1 - P0, d0) / denom
+
+    if 0.0 <= mu <= 1.0:
         return P0 + lam * d0
     return None
 
@@ -200,19 +228,51 @@ def build_plotly_figure(
         y=[P_hit[1], P_out[1]],
         mode="lines",
         line=dict(color="green"),
-        name="outgoing"
+        name="outgoing",
+    )
+
+    # pivot marker
+    fig.add_scatter(
+        x=[mirror.pivot[0]],
+        y=[mirror.pivot[1]],
+        mode="markers",
+        marker=dict(symbol="x", size=8, color="red"),
+        name="pivot",
     )
 
     # annotations
     fig.add_annotation(
-        x=P_hit[0], y=P_hit[1],
+        x=P_hit[0],
+        y=P_hit[1],
         text=f"α = {np.degrees(alpha):.2f}°<br>Δℓ = {delta_L*1e3:.3f} mm",
-        showarrow=True, arrowhead=1, ax=40, ay=-40
+        showarrow=True,
+        arrowhead=1,
+        ax=40,
+        ay=-40,
     )
+
+    xs = [emitter.pos[0], S1[0], S2[0], P_hit[0], P_out[0], mirror.pivot[0]]
+    ys = [emitter.pos[1], S1[1], S2[1], P_hit[1], P_out[1], mirror.pivot[1]]
+    pad = 0.05
+
     fig.update_layout(
-        width=700, height=700,
-        xaxis=dict(scaleanchor="y"), showlegend=True,
-        title="2-D Optotune mirror geometry"
+        width=700,
+        height=700,
+        xaxis=dict(
+            title="x (m)",
+            range=[min(xs) - pad, max(xs) + pad],
+            scaleanchor="y",
+            scaleratio=1,
+            zeroline=False,
+        ),
+        yaxis=dict(
+            title="y (m)",
+            range=[min(ys) - pad, max(ys) + pad],
+            zeroline=False,
+        ),
+        showlegend=True,
+        legend=dict(bgcolor="white", bordercolor="black", borderwidth=1),
+        title="2-D Optotune mirror geometry",
     )
     return fig
 
